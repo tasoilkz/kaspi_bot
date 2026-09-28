@@ -1,8 +1,11 @@
 import asyncio
 import logging
 import os
+import signal
+import threading
 from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
@@ -21,7 +24,30 @@ from aiogram.types import (
 
 import db
 from calculator import REGIMES, calculate_price, money
-from tariffs import TARIFFS, OIL_VOLUMES
+from tariffs import OIL_VOLUMES, TARIFFS
+
+# --- Запуск легкого HTTP-сервера для Render (Port / Health Check) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        # Отключаем спам в логи от постоянных Health Check запросов
+        pass
+
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+
+# Запускаем сервер в отдельном потоке
+threading.Thread(target=start_health_check_server, daemon=True).start()
+
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -758,7 +784,6 @@ async def purchase_price(message: Message, state: FSMContext):
         return
 
     # Повторная проверка доступа прямо перед выдачей результата
-    # (если подписка закончилась, пока пользователь вводил данные)
     if not await ensure_access(message, state):
         return
 
@@ -818,7 +843,7 @@ async def reminder_loop():
                         reply_markup=buy_keyboard(),
                     )
                 except TelegramForbiddenError:
-                    pass  # клиент заблокировал бота, повторять не нужно
+                    pass  # клиент заблокировал бота
                 except TelegramAPIError:
                     log.exception("Не удалось отправить напоминание %s, повторим позже", user_id)
                     continue
@@ -831,10 +856,15 @@ async def reminder_loop():
 async def main():
     reminder_task = asyncio.create_task(reminder_loop())
     try:
+        # Корректное удаление вебхука перед поллингом
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Бот остановлен.")

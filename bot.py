@@ -53,7 +53,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
 # --- Настройки из переменных окружения ---
-TOKEN = os.getenv("BOT_TOKEN") or "8883929833:AAGlagWxgvb-u9AqcXgubfPtWnDpJfOAp6M"
+TOKEN = os.getenv("BOT_TOKEN") or "8883929833:AAG0tWUPtPV9ggoepnwNCUumU-KZHY1F8GM"
 
 # Исправлена передача ID администратора
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1889997265"))

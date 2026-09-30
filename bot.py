@@ -53,11 +53,11 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
 # --- Настройки из переменных окружения ---
-TOKEN = os.getenv("BOT_TOKEN") or "8883929833:AAG0tWUPtPV9ggoepnwNCUumU-KZHY1F8GM"
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("ОШИБКА: Переменная окружения BOT_TOKEN не задана! Укажите её в настройках Render (Environment).")
 
-# Исправлена передача ID администратора
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1889997265"))
-
 PRICE = int(os.getenv("PRICE", "3000"))     # цена подписки на 1 месяц, ₸
 
 bot = Bot(TOKEN)
@@ -148,7 +148,7 @@ def categories_keyboard():
 
 
 def volume_keyboard():
-    return kb([[x for x in OIL_VOLUMES[:2]], [x for x in OIL_VOLUMES[2:]], ["↩️ Назад", "❌ Отмена"]])
+    return kb([[x for x in OIL_VOLUMES[:2]], [x for x in OIL_VOLUMES[2:]], ["↩️️ Назад", "❌ Отмена"]])
 
 
 def main_keyboard():
@@ -220,8 +220,8 @@ def offer_text() -> str:
     )
 
 
-REMIND_DAYS = 3                              # за сколько дней напоминать об окончании
-KZ_TZ = timezone(timedelta(hours=5))         # Казахстан, UTC+5
+REMIND_DAYS = 3                         # за сколько дней напоминать об окончании
+KZ_TZ = timezone(timedelta(hours=5))     # Казахстан, UTC+5
 
 
 def fmt_date(dt) -> str:

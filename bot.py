@@ -1,12 +1,10 @@
 import asyncio
 import logging
 import os
-import signal
-import threading
 from datetime import timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -26,36 +24,13 @@ import db
 from calculator import REGIMES, calculate_price, money
 from tariffs import OIL_VOLUMES, TARIFFS
 
-# --- Запуск легкого HTTP-сервера для Render (Port / Health Check) ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        # Отключаем спам в логи от постоянных Health Check запросов
-        pass
-
-
-def start_health_check_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
-
-
-# Запускаем сервер в отдельном потоке
-threading.Thread(target=start_health_check_server, daemon=True).start()
-
-
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
 # --- Настройки из переменных окружения ---
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("ОШИБКА: Переменная окружения BOT_TOKEN не задана! Укажите её в настройках Render (Environment).")
+    raise ValueError("ОШИБКА: Переменная окружения BOT_TOKEN не задана!")
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1889997265"))
 PRICE = int(os.getenv("PRICE", "3000"))     # цена подписки на 1 месяц, ₸
@@ -71,14 +46,14 @@ class CalcState(StatesGroup):
     purchase_price = State()
 
 
-class Setup(StatesGroup):  # первичная настройка
+class Setup(StatesGroup):
     regime = State()
     margin = State()
     packaging = State()
     delivery = State()
 
 
-class Edit(StatesGroup):  # изменение одного параметра
+class Edit(StatesGroup):
     value = State()
 
 
@@ -109,7 +84,6 @@ FIELD_COLUMN = {"margin": "margin_pct", "packaging": "packaging", "delivery": "d
 
 
 def validate(field: str, value):
-    """Возвращает текст ошибки или None, если значение подходит."""
     if value is None:
         return "Введите число, например 20 или 12.5"
     if field == "margin":
@@ -123,7 +97,7 @@ def validate(field: str, value):
 
 def settings_text(s: dict) -> str:
     return (
-        "⚙️ Ваши настройки\n\n"
+        "⚙️️ Ваши настройки\n\n"
         f"Режим: {REGIMES[s['regime']]['title']}\n"
         f"Чистая маржа: {fmt(s['margin_pct'])}%\n"
         f"Упаковка: {fmt(s['packaging'])} ₸ за единицу\n"
@@ -148,7 +122,7 @@ def categories_keyboard():
 
 
 def volume_keyboard():
-    return kb([[x for x in OIL_VOLUMES[:2]], [x for x in OIL_VOLUMES[2:]], ["↩️️ Назад", "❌ Отмена"]])
+    return kb([[x for x in OIL_VOLUMES[:2]], [x for x in OIL_VOLUMES[2:]], ["↩ Назад", "❌ Отмена"]])
 
 
 def main_keyboard():
@@ -156,7 +130,6 @@ def main_keyboard():
 
 
 def regime_inline(mode: str):
-    """mode: 'ob' (первичная настройка) или 'ed' (изменение в настройках)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=r["title"], callback_data=f"reg:{mode}:{key}")]
@@ -220,8 +193,8 @@ def offer_text() -> str:
     )
 
 
-REMIND_DAYS = 3                         # за сколько дней напоминать об окончании
-KZ_TZ = timezone(timedelta(hours=5))     # Казахстан, UTC+5
+REMIND_DAYS = 3
+KZ_TZ = timezone(timedelta(hours=5))
 
 
 def fmt_date(dt) -> str:
@@ -305,7 +278,6 @@ async def subscription(message: Message):
     await message.answer(text, reply_markup=buy_keyboard())
 
 
-# --- Настройки: просмотр и изменение (доступно и без подписки) ---
 @dp.message(F.text == "⚙️ Мои настройки")
 @dp.message(Command("settings"))
 async def my_settings(message: Message, state: FSMContext):
@@ -348,7 +320,6 @@ async def edit_regime(cb: CallbackQuery):
     )
 
 
-# --- Первичная настройка ---
 @dp.callback_query(Setup.regime, F.data.startswith("reg:ob:"))
 async def setup_regime(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":")[2]
@@ -438,7 +409,6 @@ async def edit_value(message: Message, state: FSMContext):
     )
 
 
-# --- Сообщение об ошибке ---
 @dp.message(F.text == "🐞 Сообщить об ошибке")
 @dp.message(Command("report"))
 async def report_start(message: Message, state: FSMContext):
@@ -493,10 +463,8 @@ async def report_send(message: Message, state: FSMContext):
     await message.answer("Спасибо! Мы получили ваше сообщение и разберёмся.", reply_markup=main_keyboard())
 
 
-# --- Покупка: клиент → менеджер ---
 @dp.callback_query(F.data == "buy")
 async def buy(cb: CallbackQuery):
-    """Шаг 1: предупреждение о невозврате и запрос согласия."""
     if not ADMIN_ID:
         await cb.answer("Приём оплаты пока не настроен.", show_alert=True)
         return
@@ -526,13 +494,11 @@ async def buy_cancel(cb: CallbackQuery):
 
 @dp.callback_query(F.data == "buy_confirm")
 async def buy_confirm(cb: CallbackQuery):
-    """Шаг 2: клиент согласился, создаём заявку и отправляем менеджеру."""
     if not ADMIN_ID:
         await cb.answer("Приём оплаты пока не настроен.", show_alert=True)
         return
 
     user = cb.from_user
-    # Убираем кнопки, чтобы нельзя было нажать повторно
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except TelegramAPIError:
@@ -567,7 +533,6 @@ async def buy_confirm(cb: CallbackQuery):
     )
 
 
-# --- Менеджер отвечает на заявку фото QR ---
 def _is_request_reply(message: Message) -> bool:
     if not message.reply_to_message:
         return False
@@ -596,7 +561,6 @@ async def manager_sends_qr(message: Message):
     await message.answer(f"📨 QR по заявке №{req['id']} отправлен клиенту.")
 
 
-# --- Менеджер отвечает клиенту на сообщение об ошибке ---
 def _is_report_reply(message: Message) -> bool:
     if not message.reply_to_message:
         return False
@@ -618,7 +582,6 @@ async def manager_answers_report(message: Message):
     await message.answer("📨 Ответ отправлен клиенту.")
 
 
-# --- Клиент сообщает об оплате ---
 @dp.callback_query(F.data.startswith("paid:"))
 async def paid(cb: CallbackQuery):
     req_id = int(cb.data.split(":")[1])
@@ -638,7 +601,6 @@ async def paid(cb: CallbackQuery):
     await cb.message.answer("Спасибо! Менеджер проверит оплату и откроет доступ.")
 
 
-# --- Менеджер подтверждает / отклоняет ---
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve(cb: CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
@@ -689,7 +651,6 @@ async def reject(cb: CallbackQuery):
 
 @dp.message(Command("grant"))
 async def grant(message: Message, command: CommandObject):
-    """Ручная выдача подписки менеджером: /grant <user_id> [дней]"""
     if message.from_user.id != ADMIN_ID:
         return
     try:
@@ -703,7 +664,6 @@ async def grant(message: Message, command: CommandObject):
     await message.answer(f"Готово: подписка {user_id} до {fmt_date(until)}.")
 
 
-# --- Расчёт ---
 @dp.message(CalcState.category)
 async def category(message: Message, state: FSMContext):
     name = message.text
@@ -783,7 +743,6 @@ async def purchase_price(message: Message, state: FSMContext):
         await message.answer("Введите положительную сумму, например 10000 или 12500.50")
         return
 
-    # Повторная проверка доступа прямо перед выдачей результата
     if not await ensure_access(message, state):
         return
 
@@ -815,7 +774,6 @@ async def purchase_price(message: Message, state: FSMContext):
     await message.answer(text)
     db.save_last_calc(message.from_user.id, text)
 
-    # Списываем бесплатный расчёт только после успешного результата (админу не списываем)
     if not is_admin(message.from_user.id):
         db.register_use(message.from_user.id)
     await state.clear()
@@ -826,7 +784,6 @@ async def purchase_price(message: Message, state: FSMContext):
 
 
 async def reminder_loop():
-    """Раз в час рассылает напоминания тем, у кого подписка скоро закончится."""
     while True:
         try:
             for user_id, until, raw in db.get_users_to_remind(REMIND_DAYS):
@@ -839,11 +796,11 @@ async def reminder_loop():
                         f"⏰ Ваша подписка заканчивается {fmt_date(until)}.\n\n"
                         "Чтобы не потерять доступ к расчётам, продлите её заранее: "
                         "новый месяц добавится к остатку.\n\n"
-                        "⚠️ Возврат денег не предусмотрен.",
+                        "⚠️️ Возврат денег не предусмотрен.",
                         reply_markup=buy_keyboard(),
                     )
                 except TelegramForbiddenError:
-                    pass  # клиент заблокировал бота
+                    pass
                 except TelegramAPIError:
                     log.exception("Не удалось отправить напоминание %s, повторим позже", user_id)
                     continue
@@ -853,14 +810,32 @@ async def reminder_loop():
         await asyncio.sleep(3600)
 
 
+# --- Обработчик Health Check для Render ---
+async def handle_health_check(request):
+    return web.Response(text="OK", status=200)
+
+
 async def main():
+    # Запуск HTTP сервера через aiohttp
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    app.router.add_get("/health", handle_health_check)
+    
+    port = int(os.environ.get("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"Health check HTTP server running on port {port}")
+
+    # Запуск фоновых задач и поллинга
     reminder_task = asyncio.create_task(reminder_loop())
     try:
-        # Корректное удаление вебхука перед поллингом
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         reminder_task.cancel()
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
